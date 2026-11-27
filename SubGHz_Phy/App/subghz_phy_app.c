@@ -29,8 +29,11 @@
 #include "stm32_seq.h"
 #include "stm32_timer.h"
 #include "subghz_phy_version.h"
+#include "usart.h"
 #include "utilities_def.h"
+#include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 /* USER CODE END Includes */
 
@@ -79,6 +82,11 @@ typedef enum {
 #define HOP_NODE 2
 #define DST_NODE 3
 uint16_t sequence_number = 0;
+
+// Capstone UART:
+volatile bool UART_Received = false;
+static char uart_rx_buffer[256] = {'\0'};
+static volatile uint16_t uart_rx_index = 0;
 
 /* USER CODE END PD */
 
@@ -153,6 +161,9 @@ static void PingPong_Process(void);
 /* CAPSTONE: LoREN basic process */
 static void LoREN_Process(void);
 
+/*Capstone UART callback*/
+static void UartRxCallback(uint8_t *pdata, uint16_t size, uint8_t error);
+
 /* USER CODE END PFP */
 
 /* Exported functions
@@ -165,6 +176,8 @@ void SubghzApp_Init(void) {
   APP_LOG(TS_OFF, VLEVEL_M, "APPLICATION_VERSION: V%X.%X.%X\r\n",
           (uint8_t)(APP_VERSION_MAIN), (uint8_t)(APP_VERSION_SUB1),
           (uint8_t)(APP_VERSION_SUB2));
+
+  APP_LOG(TS_OFF, VLEVEL_L, "\n\rHola1\r\n");
 
   /* Get MW SubGhz_Phy info */
   APP_LOG(TS_OFF, VLEVEL_M, "MW_RADIO_VERSION:    V%X.%X.%X\r\n",
@@ -236,6 +249,9 @@ void SubghzApp_Init(void) {
   APP_LOG(TS_ON, VLEVEL_L, "rand=%d\n\r", random_delay);
   /*starts reception*/
 
+  /* Register UART CAPSTONE*/
+  UTIL_ADV_TRACE_StartRxProcess(UartRxCallback);
+
   /*register task to to be run in while(1) after Radio IT*/
   Radio.Rx(RX_TIMEOUT_VALUE + random_delay);
   UTIL_SEQ_RegTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), UTIL_SEQ_RFU,
@@ -246,6 +262,25 @@ void SubghzApp_Init(void) {
 /* USER CODE BEGIN EF */
 
 /* USER CODE END EF */
+
+/* Capstone UART callback */
+static void UartRxCallback(uint8_t *pdata, uint16_t size, uint8_t error) {
+  /* USER CODE BEGIN UartRxCallback */
+  if ((error == 0U) && (pdata != NULL) && (size > 0U)) {
+    memcpy(uart_rx_buffer + uart_rx_index, pdata, size);
+    uart_rx_index += size;
+    if (pdata[0] == '\n') {
+      uart_rx_buffer[uart_rx_index] =
+          '\0'; // Null-terminate the received string
+      UART_Received = true;
+    }
+  } else {
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_5);
+  }
+
+  UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+  /* USER CODE END UartRxCallback */
+}
 
 /* Private functions ---------------------------------------------------------*/
 static void OnTxDone(void) {
@@ -338,6 +373,20 @@ typedef struct {
   char payload[PAYLOAD_LEN];
 } LoREN_Packet_t;
 
+void UART_TO_COMPUTER() {
+  char reply[300];
+  int len =
+      snprintf(reply, sizeof(reply), "UART Received %s!\r\n", uart_rx_buffer);
+
+  if (len > 0) {
+    uint16_t size = (len < (int)sizeof(reply)) ? (uint16_t)len
+                                               : (uint16_t)(sizeof(reply) - 1);
+
+    HAL_StatusTypeDef status =
+        HAL_UART_Transmit(&huart1, (uint8_t *)reply, size, 1000);
+  }
+}
+
 static void LoREN_Process(void) {
   Radio.Sleep();
 
@@ -361,6 +410,14 @@ static void LoREN_Process(void) {
   // default:
   //   break;
   // }
+
+  if (UART_Received) {
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_5);
+    UART_Received = false;
+    UART_TO_COMPUTER();
+    uart_rx_index = 0;        // Reset the index for the next reception
+    uart_rx_buffer[0] = '\0'; // Clear the buffer for the next reception
+  }
 
   switch (State) {
   case RX:
